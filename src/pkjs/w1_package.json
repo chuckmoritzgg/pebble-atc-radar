@@ -1,0 +1,21 @@
+{
+  "uuid": "a3f2c1d4-e5b6-4789-abcd-ef0123456789",
+  "shortName": "LOTSE",
+  "longName": "LOTSE Radar Watchface",
+  "companyName": "DFS Deutsche Flugsicherung",
+  "versionLabel": "3.1",
+  "sdkVersion": "3",
+  "targetPlatforms": ["emery", "time2", "round2"],
+  "watchapp": {
+    "watchface": true
+  },
+  "appKeys": {
+    "TEMPERATURE": 0,
+    "CONDITIONS": 1,
+    "REQUEST_WEATHER": 2
+  },
+  "capabilities": ["health", "location"],
+  "resources": {
+    "media": []
+  }
+}
