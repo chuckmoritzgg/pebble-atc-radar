@@ -1,22 +1,27 @@
 // main.c
 // LOTSE v2.3 — river bg, runway refactor, BT fix, emoji heart, WX fix+city, bigger hands/fonts
 
+
 #include <pebble.h>
+
 
 #define MESSAGE_KEY_TEMPERATURE     0
 #define MESSAGE_KEY_CONDITIONS      1
 #define MESSAGE_KEY_REQUEST_WEATHER 2
 #define MESSAGE_KEY_CITY            3
 
+
 #define PERSIST_KEY_SWEEP_MODE  10
 #define PERSIST_KEY_TARGET_TTL  11
 #define PERSIST_KEY_STEPS_GOAL  12
+
 
 typedef enum {
   SWEEP_ALWAYS = 0,
   SWEEP_BACKLIGHT = 1,
   SWEEP_NEVER = 2
 } SweepMode;
+
 
 #if defined(PBL_ROUND)
 #define SCR_W 260
@@ -34,21 +39,28 @@ typedef enum {
 #define RADAR_RADIUS 94
 #endif
 
+
 #define MAX_TARGETS 8
 #define DEFAULT_TARGET_TTL 7
 #define DEG_ANG(d) ((TRIG_MAX_ANGLE * (d)) / 360)
 
+
 typedef enum { ALPHA_100, ALPHA_75, ALPHA_50, ALPHA_25, ALPHA_12 } AlphaLevel;
+
+// Forward declaration — tick_handler is defined later but referenced by update_tick_subscription()
+static void tick_handler(struct tm *t, TimeUnits changed);
 
 static const char *MONTH_ABBR[12] = {
   "Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"
 };
+
 
 static GPoint polar(int cx, int cy, int r, int cwdeg) {
   int32_t a = DEG_ANG(cwdeg);
   return GPoint(cx + r * sin_lookup(a) / TRIG_MAX_RATIO,
                 cy - r * cos_lookup(a) / TRIG_MAX_RATIO);
 }
+
 
 static void draw_line_alpha(GContext *ctx, GPoint a, GPoint b, GColor col, AlphaLevel alpha) {
   if (alpha == ALPHA_100) {
@@ -78,6 +90,7 @@ static void draw_line_alpha(GContext *ctx, GPoint a, GPoint b, GColor col, Alpha
   }
 }
 
+
 static void draw_dashed_bold_line(GContext *ctx, GPoint a, GPoint b, GColor col, int width, int on_px, int off_px) {
   int dx = b.x - a.x, dy = b.y - a.y;
   int steps = abs(dx) > abs(dy) ? abs(dx) : abs(dy);
@@ -96,6 +109,7 @@ static void draw_dashed_bold_line(GContext *ctx, GPoint a, GPoint b, GColor col,
     }
   }
 }
+
 
 static void fill_rect_alpha(GContext *ctx, GRect r, GColor col, AlphaLevel alpha) {
   if (alpha == ALPHA_100) {
@@ -120,11 +134,13 @@ static void fill_rect_alpha(GContext *ctx, GRect r, GColor col, AlphaLevel alpha
   }
 }
 
+
 typedef struct {
   GPoint pos;
   int    ttl;
   char   call[8];
 } GhostTarget;
+
 
 static Window           *s_window;
 static Layer            *s_bg_layer, *s_rwy_layer, *s_sweep_layer, *s_blip_layer, *s_hud_layer;
@@ -143,6 +159,9 @@ static int               s_prev_sweep = -1;
 static int               s_target_ttl = DEFAULT_TARGET_TTL;
 static SweepMode         s_sweep_mode = SWEEP_BACKLIGHT;
 static bool              s_backlight_force_sweep = false;
+// Tracks which tick unit is currently subscribed to avoid redundant re-subscriptions
+static TimeUnits         s_tick_unit = 0;
+
 
 static Window           *s_menu_window;
 static SimpleMenuLayer  *s_menu_layer;
@@ -152,11 +171,13 @@ static char              s_sweep_subtitle[16];
 static char              s_ttl_subtitle[16];
 static char              s_goal_subtitle[16];
 
+
 static const struct { int az; float r_frac; const char *call; } SPAWN_TABLE[] = {
   {  18, 0.56f, "DLH1A" }, {  62, 0.72f, "EZY3B" }, { 108, 0.50f, "RYR7C" }, { 156, 0.64f, "AFL2D" },
   { 205, 0.58f, "TUI5E" }, { 246, 0.69f, "WZZ9F" }, { 292, 0.43f, "CLX6H" }, { 334, 0.61f, "HLX4G" }
 };
 #define N_SPAWNS ((int)(sizeof(SPAWN_TABLE)/sizeof(SPAWN_TABLE[0])))
+
 
 static GPoint geo(float lat, float lon) {
   float km_per_unit = 2.3f * 1.852f;
@@ -165,17 +186,32 @@ static GPoint geo(float lat, float lon) {
   return GPoint((int)(CX + dx * NM_PX), (int)(CY - dy * NM_PX));
 }
 
+
 static bool sweep_visible(void) {
   if (s_sweep_mode == SWEEP_ALWAYS)    return true;
   if (s_sweep_mode == SWEEP_BACKLIGHT) return s_backlight_force_sweep;
   return false;
 }
 
+
+// ── Tick subscription helper ───────────────────────────────────────────────
+// Subscribe to SECOND_UNIT when the sweep is active (needs per-second redraws),
+// or MINUTE_UNIT otherwise (saves battery).  Re-subscribing is a no-op when
+// the required unit has not changed.
+static void update_tick_subscription(void) {
+  TimeUnits needed = sweep_visible() ? SECOND_UNIT : MINUTE_UNIT;
+  if (needed == s_tick_unit) return;
+  tick_timer_service_subscribe(needed, tick_handler);
+  s_tick_unit = needed;
+}
+
+
 static void save_settings(void) {
   persist_write_int(PERSIST_KEY_SWEEP_MODE, (int)s_sweep_mode);
   persist_write_int(PERSIST_KEY_TARGET_TTL, s_target_ttl);
   persist_write_int(PERSIST_KEY_STEPS_GOAL, s_steps_goal);
 }
+
 
 static void load_settings(void) {
   if (persist_exists(PERSIST_KEY_SWEEP_MODE)) s_sweep_mode = (SweepMode)persist_read_int(PERSIST_KEY_SWEEP_MODE);
@@ -184,6 +220,7 @@ static void load_settings(void) {
   if (s_target_ttl < 4) s_target_ttl = DEFAULT_TARGET_TTL;
   if (s_steps_goal <= 0) s_steps_goal = 10000;
 }
+
 
 static void draw_battery_icon(GContext *ctx, GRect r, int pct, bool charging) {
   graphics_context_set_stroke_color(ctx, GColorBlack);
@@ -211,6 +248,7 @@ static void draw_battery_icon(GContext *ctx, GRect r, int pct, bool charging) {
   }
 }
 
+
 #if !defined(PBL_ROUND)
 static void draw_steps_icon(GContext *ctx, int x, int y, GColor col) {
   graphics_context_set_fill_color(ctx, col);
@@ -220,6 +258,7 @@ static void draw_steps_icon(GContext *ctx, int x, int y, GColor col) {
   graphics_fill_rect(ctx, GRect(x + 9, y + 3, 4, 5), 1, GCornersAll);
 }
 #endif
+
 
 // ── Bluetooth icon — correct ♦ fork shape ─────────────────────────────────
 static void draw_bt_icon(GContext *ctx, int x, int y, GColor col) {
@@ -234,10 +273,12 @@ static void draw_bt_icon(GContext *ctx, int x, int y, GColor col) {
   graphics_draw_line(ctx, GPoint(x + 4, y + 10), GPoint(x + 1, y + 7));
 }
 
+
 // ── bg_layer: river FIRST, underneath everything ───────────────────────────
 static void bg_layer_draw(Layer *layer, GContext *ctx) {
   graphics_context_set_fill_color(ctx, GColorWhite);
   graphics_fill_rect(ctx, layer_get_bounds(layer), 0, GCornerNone);
+
 
   // River Rhine — drawn first, sits under all labels/runways/radar
   static const float rhine[][2] = {
@@ -256,6 +297,7 @@ static void bg_layer_draw(Layer *layer, GContext *ctx) {
   }
   graphics_context_set_stroke_width(ctx, 1);
 
+
   // VOR symbol
   GPoint vor = geo(51.2897f, 6.7663f);
   graphics_context_set_stroke_color(ctx, GColorChromeYellow);
@@ -268,12 +310,14 @@ static void bg_layer_draw(Layer *layer, GContext *ctx) {
     }
   }
 
+
   // EDDL label — shifted to very top
   graphics_context_set_text_color(ctx, GColorChromeYellow);
   graphics_draw_text(ctx, "EDDL",
                      fonts_get_system_font(FONT_KEY_BITHAM_30_BLACK),
                      GRect(0, -2, SCR_W, 24),
                      GTextOverflowModeFill, GTextAlignmentCenter, NULL);
+
 
   // Time + date (date 3 px lower than original)
   char ltime[6], ldate[16];
@@ -282,6 +326,7 @@ static void bg_layer_draw(Layer *layer, GContext *ctx) {
   if (m < 0) m = 0;
   if (m > 11) m = 11;
   snprintf(ldate, sizeof(ldate), "%d. %s", s_now.tm_mday, MONTH_ABBR[m]);
+
 
   graphics_context_set_text_color(ctx, GColorBlack);
 #if defined(PBL_ROUND)
@@ -307,6 +352,7 @@ static void bg_layer_draw(Layer *layer, GContext *ctx) {
 #endif
 }
 
+
 // ── Two independent runways, each with its own center line ─────────────────
 static void rwy_layer_draw(Layer *layer, GContext *ctx) {
   static const struct { float mlat, mlon; float half_nm; } rwys[2] = {
@@ -319,11 +365,13 @@ static void rwy_layer_draw(Layer *layer, GContext *ctx) {
   int     ext_solid = (int)(0.50f * NM_PX);
   int     ext_dash  = (int)(1.20f * NM_PX);
 
+
   for (int i = 0; i < 2; i++) {
     GPoint mid  = geo(rwys[i].mlat, rwys[i].mlon);
     int    half = (int)(rwys[i].half_nm * NM_PX);
     GPoint t05  = polar(mid.x, mid.y, half, 231);
     GPoint t23  = polar(mid.x, mid.y, half, 51);
+
 
     for (int side = -1; side <= 1; side += 2) {
       GPoint a = GPoint(t05.x + side * rwy_hw * perp_sin / TRIG_MAX_RATIO,
@@ -332,6 +380,7 @@ static void rwy_layer_draw(Layer *layer, GContext *ctx) {
                         t23.y - side * rwy_hw * perp_cos / TRIG_MAX_RATIO);
       draw_line_alpha(ctx, a, b, GColorDarkGreen, ALPHA_75);
     }
+
 
     GPoint a1 = GPoint(t05.x - rwy_hw * perp_sin / TRIG_MAX_RATIO,
                        t05.y + rwy_hw * perp_cos / TRIG_MAX_RATIO);
@@ -344,6 +393,7 @@ static void rwy_layer_draw(Layer *layer, GContext *ctx) {
     draw_line_alpha(ctx, a1, a2, GColorBlack, ALPHA_100);
     draw_line_alpha(ctx, b1, b2, GColorBlack, ALPHA_100);
 
+
     // Center line — belongs exclusively to this runway
     for (int s = -half + 4; s < half - 4; s += 8) {
       draw_line_alpha(ctx,
@@ -351,6 +401,7 @@ static void rwy_layer_draw(Layer *layer, GContext *ctx) {
         polar(mid.x, mid.y, s + 5, 51),
         GColorDarkGreen, ALPHA_75);
     }
+
 
     for (int dir = 0; dir < 2; dir++) {
       int    hdg     = (dir == 0) ? 231 : 51;
@@ -367,9 +418,11 @@ static void rwy_layer_draw(Layer *layer, GContext *ctx) {
   }
 }
 
+
 static void sweep_layer_draw(Layer *layer, GContext *ctx) {
   int sweep_deg = s_now.tm_sec * 6;
   int r_max     = 2 * NM_PX;
+
 
   for (int nm = 1; nm <= 2; nm++) {
     int r = nm * NM_PX;
@@ -388,12 +441,14 @@ static void sweep_layer_draw(Layer *layer, GContext *ctx) {
       d % 30 == 0 ? ALPHA_100 : ALPHA_50);
   }
 
+
   bool sweep_on = sweep_visible();
 #if defined(PBL_ROUND)
   graphics_context_set_stroke_color(ctx, GColorBlack);
   graphics_context_set_stroke_width(ctx, 1);
   graphics_draw_circle(ctx, GPoint(CX, CY), r_max);
 #endif
+
 
   if (sweep_on) {
     static const AlphaLevel trail_alpha[] = { ALPHA_75, ALPHA_50, ALPHA_50, ALPHA_25, ALPHA_12 };
@@ -410,6 +465,7 @@ static void sweep_layer_draw(Layer *layer, GContext *ctx) {
     graphics_context_set_stroke_width(ctx, 1);
     graphics_draw_line(ctx, GPoint(CX, CY), polar(CX, CY, r_max, sweep_deg));
   }
+
 
   if (sweep_on) {
     for (int s = 0; s < N_SPAWNS; s++) {
@@ -438,6 +494,7 @@ static void sweep_layer_draw(Layer *layer, GContext *ctx) {
     s_prev_sweep = -1;
   }
 
+
   GFont f9 = fonts_get_system_font(FONT_KEY_GOTHIC_09);
   for (int t = 0; t < MAX_TARGETS; t++) {
     if (s_targets[t].ttl == 0) continue;
@@ -458,6 +515,7 @@ static void sweep_layer_draw(Layer *layer, GContext *ctx) {
   }
 }
 
+
 // ── blip_layer: 18×18 squares (+7px), velocity lines stroke_width 1 (less bold) ──
 static void blip_layer_draw(Layer *layer, GContext *ctx) {
   int hour_12   = s_now.tm_hour % 12;
@@ -469,32 +527,38 @@ static void blip_layer_draw(Layer *layer, GContext *ctx) {
   int v_len_hr  = (int)(0.18f * 2 * NM_PX);
   int v_len_min = (int)(0.24f * 2 * NM_PX);
 
+
   GPoint hr_pt   = polar(CX, CY, r_hr,  hr_ang);
   GPoint min_pt  = polar(CX, CY, r_min, min_ang);
   GPoint hr_vec  = polar(hr_pt.x,  hr_pt.y,  v_len_hr,  hr_ang);
   GPoint min_vec = polar(min_pt.x, min_pt.y, v_len_min, min_ang);
 
+
   draw_dashed_bold_line(ctx, GPoint(CX, CY), hr_pt,  GColorDarkCandyAppleRed, 2, 6, 3);
   draw_dashed_bold_line(ctx, GPoint(CX, CY), min_pt, GColorOxfordBlue,        2, 6, 3);
 
-  
+
   graphics_context_set_stroke_color(ctx, GColorDarkCandyAppleRed);
   graphics_context_set_stroke_width(ctx, 2);
   graphics_draw_line(ctx, hr_pt, hr_vec);
 
+
   graphics_context_set_stroke_color(ctx, GColorOxfordBlue);
   graphics_context_set_stroke_width(ctx, 2);
   graphics_draw_line(ctx, min_pt, min_vec);
+
 
   graphics_context_set_fill_color(ctx, GColorDarkCandyAppleRed);
   graphics_fill_rect(ctx, GRect(hr_pt.x - 5, hr_pt.y - 5, 11, 11), 0, GCornerNone);
   graphics_context_set_fill_color(ctx, GColorWhite);
   graphics_fill_rect(ctx, GRect(hr_pt.x - 1, hr_pt.y - 1, 3, 3), 0, GCornerNone);
 
+
   graphics_context_set_fill_color(ctx, GColorOxfordBlue);
   graphics_fill_rect(ctx, GRect(min_pt.x - 5, min_pt.y - 5, 11, 11), 0, GCornerNone);
   graphics_context_set_fill_color(ctx, GColorWhite);
   graphics_fill_rect(ctx, GRect(min_pt.x - 1, min_pt.y - 1, 3, 3), 0, GCornerNone);
+
 
   GFont f9 = fonts_get_system_font(FONT_KEY_GOTHIC_09);
   char hcall[8], mcall[8];
@@ -510,11 +574,13 @@ static void blip_layer_draw(Layer *layer, GContext *ctx) {
                      GRect(mtxt.x - 18, mtxt.y - 5, 36, 10),
                      GTextOverflowModeFill, GTextAlignmentCenter, NULL);
 
+
   graphics_context_set_fill_color(ctx, GColorJaegerGreen);
   graphics_fill_circle(ctx, GPoint(CX, CY), 4);
   graphics_context_set_fill_color(ctx, GColorWhite);
   graphics_fill_circle(ctx, GPoint(CX, CY), 2);
 }
+
 
 static void draw_corner_status(GContext *ctx) {
   GFont f9 = fonts_get_system_font(FONT_KEY_GOTHIC_09);
@@ -529,11 +595,13 @@ static void draw_corner_status(GContext *ctx) {
 #endif
 }
 
+
 // ── hud_layer: WX above UTC strip, emoji ❤, bigger step/HR font ───────────
 static void hud_layer_draw(Layer *layer, GContext *ctx) {
   GFont f9  = fonts_get_system_font(FONT_KEY_GOTHIC_09);
   GFont f18 = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
   draw_corner_status(ctx);
+
 
   time_t now_utc = time(NULL);
   struct tm *utc_tm = gmtime(&now_utc);
@@ -541,21 +609,25 @@ static void hud_layer_draw(Layer *layer, GContext *ctx) {
   if (utc_tm) snprintf(utime, sizeof(utime), "%02d:%02d", utc_tm->tm_hour, utc_tm->tm_min);
   else        snprintf(utime, sizeof(utime), "--:--");
 
+
   char stepbuf[12];
   if (s_steps >= 1000)
     snprintf(stepbuf, sizeof(stepbuf), "%d.%dk", s_steps / 1000, (s_steps % 1000) / 100);
   else
     snprintf(stepbuf, sizeof(stepbuf), "%d", s_steps);
 
+
   char hrbuf[8];
   if (s_hr > 0) snprintf(hrbuf, sizeof(hrbuf), "%d", s_hr);
   else          snprintf(hrbuf, sizeof(hrbuf), "--");
+
 
   char wxbuf[24];
   if (s_temp_c > -999)
     snprintf(wxbuf, sizeof(wxbuf), "%dC %s", s_temp_c, s_conditions);
   else
     snprintf(wxbuf, sizeof(wxbuf), "WX --");
+
 
 #if defined(PBL_ROUND)
   // STEPS (top-right)
@@ -567,6 +639,7 @@ static void hud_layer_draw(Layer *layer, GContext *ctx) {
                      GRect(SCR_W - 78, 18, 72, 22),
                      GTextOverflowModeFill, GTextAlignmentRight, NULL);
 
+
   // ❤ emoji + HR value
   graphics_context_set_text_color(ctx, GColorDarkCandyAppleRed);
   graphics_draw_text(ctx, "\u2764", f18,
@@ -576,6 +649,7 @@ static void hud_layer_draw(Layer *layer, GContext *ctx) {
   graphics_draw_text(ctx, hrbuf, f18,
                      GRect(SCR_W - 78, 44, 50, 22),
                      GTextOverflowModeFill, GTextAlignmentRight, NULL);
+
 
   // WX — fully above the UTC strip (UTC strip top = SCR_H-26 = 234)
   // WX value (22px) ends at SCR_H-26-2=232, label above that
@@ -588,6 +662,7 @@ static void hud_layer_draw(Layer *layer, GContext *ctx) {
   graphics_draw_text(ctx, wxbuf, f18,
                      GRect(SCR_W - 92, SCR_H - 48, 90, 22),
                      GTextOverflowModeFill, GTextAlignmentRight, NULL);
+
 
   // UTC strip — drawn last so it cleanly overlays the radar edge
   int y_utc = SCR_H - 26;
@@ -603,6 +678,7 @@ static void hud_layer_draw(Layer *layer, GContext *ctx) {
                      GRect(CX + 12, y_utc + 3, 24, 10),
                      GTextOverflowModeFill, GTextAlignmentLeft, NULL);
 
+
 #else
   // STEPS (top-right)
   graphics_context_set_text_color(ctx, GColorBlack);
@@ -612,6 +688,7 @@ static void hud_layer_draw(Layer *layer, GContext *ctx) {
   graphics_draw_text(ctx, stepbuf, f18,
                      GRect(SCR_W - 78, 18, 72, 22),
                      GTextOverflowModeFill, GTextAlignmentRight, NULL);
+
 
   // ❤ emoji + HR value
   graphics_context_set_text_color(ctx, GColorDarkCandyAppleRed);
@@ -623,7 +700,6 @@ static void hud_layer_draw(Layer *layer, GContext *ctx) {
                      GRect(SCR_W - 78, 42, 52, 22),
                      GTextOverflowModeFill, GTextAlignmentRight, NULL);
 
-  
 
   // UTC strip — drawn last
   int py = SCR_H - 24;
@@ -639,6 +715,7 @@ static void hud_layer_draw(Layer *layer, GContext *ctx) {
                      GRect(78, py + 3, 40, 10),
                      GTextOverflowModeFill, GTextAlignmentLeft, NULL);
 
+
   // WX — fully above the UTC strip (UTC strip top = SCR_H-24 = 204)
   // WX value (22px) must end before y=204: place at y=180, label at y=168
   graphics_context_set_text_color(ctx, GColorDarkGreen);
@@ -653,6 +730,7 @@ static void hud_layer_draw(Layer *layer, GContext *ctx) {
 #endif
 }
 
+
 static void request_weather(void) {
   DictionaryIterator *iter;
   if (app_message_outbox_begin(&iter) == APP_MSG_OK) {
@@ -660,6 +738,7 @@ static void request_weather(void) {
     app_message_outbox_send();
   }
 }
+
 
 static void tick_handler(struct tm *t, TimeUnits changed) {
   s_now = *t;
@@ -673,17 +752,20 @@ static void tick_handler(struct tm *t, TimeUnits changed) {
   }
 }
 
+
 static void battery_handler(BatteryChargeState state) {
   s_battery  = state.charge_percent;
   s_charging = state.is_charging;
   layer_mark_dirty(s_hud_layer);
 }
 
+
 static void bt_handler(bool connected) {
   s_bt_ok = connected;
   if (!connected) vibes_short_pulse();
   layer_mark_dirty(s_hud_layer);
 }
+
 
 #if defined(PBL_HEALTH)
 static void health_handler(HealthEventType event, void *ctx) {
@@ -705,6 +787,7 @@ static void health_handler(HealthEventType event, void *ctx) {
 }
 #endif
 
+
 static void inbox_handler(DictionaryIterator *iter, void *ctx) {
   Tuple *t;
   if ((t = dict_find(iter, MESSAGE_KEY_TEMPERATURE))) s_temp_c = (int)t->value->int32;
@@ -718,6 +801,7 @@ static void inbox_handler(DictionaryIterator *iter, void *ctx) {
   }
   layer_mark_dirty(s_hud_layer);
 }
+
 
 static void menu_reload(void) {
   snprintf(s_sweep_subtitle, sizeof(s_sweep_subtitle), "%s",
@@ -733,6 +817,7 @@ static void menu_reload(void) {
   s_menu_items[5] = (SimpleMenuItem){ .title = "Steps goal",                .subtitle = s_goal_subtitle };
   s_menu_items[6] = (SimpleMenuItem){ .title = "Select with up/down/select", .subtitle = "Hold back for exit" };
 }
+
 
 static void menu_select_callback(int index, void *ctx) {
   switch(index) {
@@ -751,9 +836,12 @@ static void menu_select_callback(int index, void *ctx) {
   menu_reload();
   if (s_menu_window && s_menu_layer)
     layer_mark_dirty(simple_menu_layer_get_layer(s_menu_layer));
+  // Sweep mode may have changed — update tick subscription accordingly
+  update_tick_subscription();
   layer_mark_dirty(s_sweep_layer);
   layer_mark_dirty(s_hud_layer);
 }
+
 
 static void menu_window_load(Window *window) {
   menu_reload();
@@ -765,10 +853,12 @@ static void menu_window_load(Window *window) {
   layer_add_child(window_layer, simple_menu_layer_get_layer(s_menu_layer));
 }
 
+
 static void menu_window_unload(Window *window) {
   if (s_menu_layer) simple_menu_layer_destroy(s_menu_layer);
   s_menu_layer = NULL;
 }
+
 
 static void click_select_handler(ClickRecognizerRef recognizer, void *context) {
   if (!s_menu_window) {
@@ -781,15 +871,20 @@ static void click_select_handler(ClickRecognizerRef recognizer, void *context) {
   window_stack_push(s_menu_window, true);
 }
 
+
 static void click_up_handler(ClickRecognizerRef recognizer, void *context) {
   s_backlight_force_sweep = true;
   light_enable_interaction();
+  // Backlight just turned on — may need to upgrade to SECOND_UNIT
+  update_tick_subscription();
   layer_mark_dirty(s_sweep_layer);
 }
+
 
 static void click_down_handler(ClickRecognizerRef recognizer, void *context) {
   request_weather();
 }
+
 
 static void click_config_provider(void *context) {
   window_single_click_subscribe(BUTTON_ID_SELECT, click_select_handler);
@@ -797,10 +892,12 @@ static void click_config_provider(void *context) {
   window_single_click_subscribe(BUTTON_ID_DOWN,   click_down_handler);
 }
 
+
 static void window_load(Window *win) {
   Layer *root = window_get_root_layer(win);
   GRect  b    = layer_get_bounds(root);
   window_set_background_color(win, GColorWhite);
+
 
   s_bg_layer    = layer_create(b);
   s_rwy_layer   = layer_create(b);
@@ -808,11 +905,13 @@ static void window_load(Window *win) {
   s_blip_layer  = layer_create(b);
   s_hud_layer   = layer_create(b);
 
+
   layer_set_update_proc(s_bg_layer,    bg_layer_draw);
   layer_set_update_proc(s_rwy_layer,   rwy_layer_draw);
   layer_set_update_proc(s_sweep_layer, sweep_layer_draw);
   layer_set_update_proc(s_blip_layer,  blip_layer_draw);
   layer_set_update_proc(s_hud_layer,   hud_layer_draw);
+
 
   layer_add_child(root, s_bg_layer);
   layer_add_child(root, s_rwy_layer);
@@ -820,15 +919,18 @@ static void window_load(Window *win) {
   layer_add_child(root, s_blip_layer);
   layer_add_child(root, s_hud_layer);
 
+
   time_t      now = time(NULL);
   struct tm  *t   = localtime(&now);
   if (t) s_now = *t;
+
 
   BatteryChargeState bat = battery_state_service_peek();
   s_battery  = bat.charge_percent;
   s_charging = bat.is_charging;
   s_bt_ok    = connection_service_peek_pebble_app_connection();
 }
+
 
 static void window_unload(Window *win) {
   layer_destroy(s_hud_layer);
@@ -837,6 +939,7 @@ static void window_unload(Window *win) {
   layer_destroy(s_rwy_layer);
   layer_destroy(s_bg_layer);
 }
+
 
 static void init(void) {
   load_settings();
@@ -848,7 +951,13 @@ static void init(void) {
   window_set_click_config_provider(s_window, click_config_provider);
   window_stack_push(s_window, true);
 
-  tick_timer_service_subscribe(SECOND_UNIT, tick_handler);
+
+  // Subscribe at MINUTE_UNIT by default; update_tick_subscription() will
+  // upgrade to SECOND_UNIT automatically if sweep starts immediately.
+  tick_timer_service_subscribe(MINUTE_UNIT, tick_handler);
+  s_tick_unit = MINUTE_UNIT;
+  update_tick_subscription();
+
   battery_state_service_subscribe(battery_handler);
   connection_service_subscribe((ConnectionHandlers){
     .pebble_app_connection_handler = bt_handler
@@ -861,10 +970,12 @@ static void init(void) {
   request_weather();
 }
 
+
 static void deinit(void) {
   if (s_menu_window) window_destroy(s_menu_window);
   window_destroy(s_window);
 }
+
 
 int main(void) {
   init();
