@@ -586,13 +586,9 @@ static void draw_corner_status(GContext *ctx) {
   GFont f9 = fonts_get_system_font(FONT_KEY_GOTHIC_09);
   draw_battery_icon(ctx, GRect(6, 6, 16, 8), s_battery, s_charging);
   draw_bt_icon(ctx, 6, 18, s_bt_ok ? GColorDarkGreen : GColorRed);
-#if defined(PBL_ROUND)
-  if (!s_bt_ok) {
-    graphics_context_set_text_color(ctx, GColorRed);
-    graphics_draw_text(ctx, "BT", f9, GRect(6, 30, 24, 12),
-                       GTextOverflowModeFill, GTextAlignmentLeft, NULL);
+  if (s_bt_ok) {
+      draw_bt_icon(ctx, 6, 18, GColorOxfordBlue);
   }
-#endif
 }
 
 
